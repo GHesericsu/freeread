@@ -94,6 +94,9 @@ freeread https://ft.com/article --method stealth
 # Use a proxy (optional)
 freeread https://ft.com/article --proxy "$DECODO_MOBILE_PROXY"
 
+# Use your own session cookies (for hard paywalls like WSJ Live)
+freeread https://wsj.com/... --cookies ./wsj-cookies.txt
+
 # Raw text output (no rich formatting, good for piping)
 freeread https://nytimes.com/article --raw
 

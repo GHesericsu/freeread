@@ -9,9 +9,11 @@ Notes:
 """
 
 import argparse
+import http.cookiejar
 import os
 import re
 import sys
+from typing import Dict, List, Optional
 
 import html2text
 import requests
@@ -48,7 +50,42 @@ MIN_CONTENT_LENGTH = 300
 
 RUNTIME = {
     "proxy": None,
+    "cookies": None,  # Dict of cookie names/values
+    "cookies_raw": None,  # List of dicts for Scrapling
 }
+
+
+def parse_cookies(cookie_file: str):
+    """Parse Netscape cookie file or text cookies."""
+    cj = http.cookiejar.MozillaCookieJar(cookie_file)
+    try:
+        cj.load(ignore_discard=True, ignore_expires=True)
+    except Exception as e:
+        # Try parsing as simple semicolon-separated string if file load fails
+        if os.path.exists(cookie_file):
+            with open(cookie_file, "r") as f:
+                content = f.read()
+        else:
+            content = cookie_file
+
+        cookies = {}
+        for item in content.split(";"):
+            if "=" in item:
+                name, value = item.strip().split("=", 1)
+                cookies[name] = value
+        return cookies
+
+    cookies = {}
+    cookies_raw = []
+    for cookie in cj:
+        cookies[cookie.name] = cookie.value
+        cookies_raw.append({
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain,
+            "path": cookie.path,
+        })
+    return cookies, cookies_raw
 
 
 def clean_html_to_text(html: str) -> tuple[str, str]:
@@ -77,17 +114,22 @@ def _requests_proxies():
     return {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
 
 
+def _get_kwargs(headers=None):
+    kwargs = {
+        "timeout": TIMEOUT,
+        "headers": headers or HEADERS_NORMAL,
+        "proxies": _requests_proxies(),
+    }
+    if RUNTIME.get("cookies"):
+        kwargs["cookies"] = RUNTIME["cookies"]
+    return kwargs
+
+
 def try_archive_ph(url: str):
-    proxies = _requests_proxies()
+    kwargs = _get_kwargs(HEADERS_NORMAL)
     for archive_url in [f"https://archive.ph/newest/{url}", f"https://archive.ph/{url}"]:
         try:
-            r = requests.get(
-                archive_url,
-                timeout=TIMEOUT,
-                headers=HEADERS_NORMAL,
-                allow_redirects=True,
-                proxies=proxies,
-            )
+            r = requests.get(archive_url, allow_redirects=True, **kwargs)
             if r.status_code == 200:
                 title, text = clean_html_to_text(r.text)
                 if is_sufficient(text):
@@ -98,14 +140,9 @@ def try_archive_ph(url: str):
 
 
 def try_12ft(url: str):
-    proxies = _requests_proxies()
+    kwargs = _get_kwargs(HEADERS_NORMAL)
     try:
-        r = requests.get(
-            f"https://12ft.io/proxy?q={url}",
-            timeout=TIMEOUT,
-            headers=HEADERS_NORMAL,
-            proxies=proxies,
-        )
+        r = requests.get(f"https://12ft.io/proxy?q={url}", **kwargs)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -116,9 +153,9 @@ def try_12ft(url: str):
 
 
 def try_google_referer(url: str):
-    proxies = _requests_proxies()
+    kwargs = _get_kwargs(HEADERS_GOOGLE_REFERER)
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER, proxies=proxies)
+        r = requests.get(url, **kwargs)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -129,6 +166,13 @@ def try_google_referer(url: str):
 
 
 def try_cookie_clear(url: str):
+    """
+    Cookie-clearing bypass. If cookies are provided via CLI, this is skipped
+    as it would clear the user's provided session.
+    """
+    if RUNTIME.get("cookies"):
+        return None
+
     proxies = _requests_proxies()
     try:
         session = requests.Session()
@@ -144,9 +188,9 @@ def try_cookie_clear(url: str):
 
 
 def try_googlebot(url: str):
-    proxies = _requests_proxies()
+    kwargs = _get_kwargs(HEADERS_GOOGLEBOT)
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLEBOT, proxies=proxies)
+        r = requests.get(url, **kwargs)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -157,19 +201,14 @@ def try_googlebot(url: str):
 
 
 def try_wayback(url: str):
-    proxies = _requests_proxies()
+    kwargs = _get_kwargs(HEADERS_NORMAL)
     try:
-        r = requests.get(
-            f"https://archive.org/wayback/available?url={url}",
-            timeout=TIMEOUT,
-            headers=HEADERS_NORMAL,
-            proxies=proxies,
-        )
+        r = requests.get(f"https://archive.org/wayback/available?url={url}", **kwargs)
         data = r.json()
         snapshot = data.get("archived_snapshots", {}).get("closest", {})
         if not snapshot or snapshot.get("status") != "200":
             return None
-        r2 = requests.get(snapshot["url"], timeout=TIMEOUT, headers=HEADERS_NORMAL, proxies=proxies)
+        r2 = requests.get(snapshot["url"], **kwargs)
         r2.raise_for_status()
         title, text = clean_html_to_text(r2.text)
         if is_sufficient(text):
@@ -196,6 +235,8 @@ def try_scrapling_http(url: str):
         )
         if RUNTIME.get("proxy"):
             kwargs["proxy"] = RUNTIME["proxy"]
+        if RUNTIME.get("cookies"):
+            kwargs["cookies"] = RUNTIME["cookies"]
 
         r = f.get(url, **kwargs)
         if getattr(r, "status", None) == 200 and getattr(r, "html_content", None):
@@ -224,6 +265,8 @@ def try_scrapling_stealth(url: str):
         )
         if RUNTIME.get("proxy"):
             kwargs["proxy"] = RUNTIME["proxy"]
+        if RUNTIME.get("cookies_raw"):
+            kwargs["cookies"] = RUNTIME["cookies_raw"]
 
         page = fetcher.fetch(url, **kwargs)
         if page and page.html_content:
@@ -250,6 +293,8 @@ def try_scrapling_dynamic(url: str):
         )
         if RUNTIME.get("proxy"):
             kwargs["proxy"] = RUNTIME["proxy"]
+        if RUNTIME.get("cookies_raw"):
+            kwargs["cookies"] = RUNTIME["cookies_raw"]
 
         page = fetcher.fetch(url, **kwargs)
         if page and page.html_content:
@@ -324,6 +369,12 @@ def main():
         default=None,
         help="Proxy URL. Also reads FREEREAD_PROXY or DECODO_MOBILE_PROXY env vars",
     )
+    parser.add_argument(
+        "--cookies",
+        "-c",
+        default=None,
+        help="Path to a Netscape cookie file or a cookie string",
+    )
 
     args = parser.parse_args()
 
@@ -341,6 +392,11 @@ def main():
     proxy = args.proxy or os.environ.get("FREEREAD_PROXY") or os.environ.get("DECODO_MOBILE_PROXY")
     if proxy:
         RUNTIME["proxy"] = proxy
+
+    if args.cookies:
+        cookies, cookies_raw = parse_cookies(args.cookies)
+        RUNTIME["cookies"] = cookies
+        RUNTIME["cookies_raw"] = cookies_raw
 
     output_mode = "md" if args.md else ("raw" if args.raw else "rich")
     if output_mode in ("md", "raw"):
