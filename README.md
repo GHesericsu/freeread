@@ -10,12 +10,17 @@ freeread https://www.nytimes.com/some-article
 
 `freeread` tries multiple bypass methods in order until one works:
 
-| Method | How |
-|---|---|
-| **Wayback Machine** | Finds cached snapshot via archive.org API |
-| **archive.ph** | Fetches newest cached version from archive.ph |
-| **12ft.io** | Routes through 12ft.io proxy |
-| **Googlebot UA** | Fetches directly with Googlebot user-agent (many publishers whitelist Google) |
+- `ph` archive.ph (public cache)
+- `12ft` 12ft.io proxy
+- `ref` Google Referer header trick
+- `cookie` cookie-clearing (metered paywalls)
+- `http` Scrapling HTTP fetch (curl_cffi impersonation)
+- `bot` Googlebot user-agent spoof
+- `stealth` Scrapling headless browser plus Cloudflare bypass
+- `dynamic` Scrapling Playwright render (JS-heavy)
+- `wb` Wayback Machine (slowest)
+
+Scrapling methods are optional. Install with `pip install freeread[scrapling]`.
 
 ## Install
 
@@ -23,10 +28,13 @@ freeread https://www.nytimes.com/some-article
 
 ### pipx (recommended for most users)
 
-Installs `freeread` as an isolated CLI tool — no virtualenv setup, no conflicts.
+Installs `freeread` as an isolated CLI tool. No virtualenv setup, no conflicts.
 
 ```bash
 pipx install freeread
+
+# With Scrapling-powered methods
+pipx install "freeread[scrapling]"
 ```
 
 > Install pipx first if needed: `pip install pipx` or `brew install pipx`
@@ -42,6 +50,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install freeread
 uv pip install freeread
 
+# With Scrapling-powered methods
+uv pip install "freeread[scrapling]"
+
 # Or run directly without installing
 uv run freeread <url>
 ```
@@ -50,6 +61,9 @@ uv run freeread <url>
 
 ```bash
 pip install freeread
+
+# With Scrapling-powered methods
+pip install "freeread[scrapling]"
 ```
 
 > If you hit `externally-managed-environment` on Ubuntu/Debian, add `--break-system-packages` or use pipx/uv instead.
@@ -69,11 +83,16 @@ freeread <url>
 # Read any article
 freeread https://www.wsj.com/some-article
 
+# Clean markdown output (good for piping to an LLM)
+freeread https://www.theatlantic.com/... --md > article.md
+
 # Force a specific method
-freeread https://ft.com/article --method wb    # Wayback Machine
-freeread https://ft.com/article --method ph    # archive.ph
-freeread https://ft.com/article --method 12ft  # 12ft.io
-freeread https://ft.com/article --method bot   # Googlebot UA
+freeread https://ft.com/article --method ph
+freeread https://ft.com/article --method cookie
+freeread https://ft.com/article --method stealth
+
+# Use a proxy (optional)
+freeread https://ft.com/article --proxy "$DECODO_MOBILE_PROXY"
 
 # Raw text output (no rich formatting, good for piping)
 freeread https://nytimes.com/article --raw

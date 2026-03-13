@@ -4,20 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "freeread"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read paywalled articles in your terminal"
 readme = "README.md"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.31.0",
-    "readability-lxml>=0.8.1",
-    "rich>=13.0.0",
-    "html2text>=2024.2.26",
+  "requests>=2.31.0",
+  "readability-lxml>=0.8.1",
+  "rich>=13.0.0",
+  "html2text>=2024.2.26",
 ]
 
+[project.optional-dependencies]
+# Optional bypass engines
+scrapling = ["scrapling"]
+
 [project.scripts]
-freeread = "freeread:main"
+freeread = "freeread.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["freeread.py"]
+packages = ["freeread"]
