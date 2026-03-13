@@ -21,11 +21,40 @@ freeread https://www.nytimes.com/some-article
 
 **Requirements:** Python 3.10+
 
+### pipx (recommended for most users)
+
+Installs `freeread` as an isolated CLI tool — no virtualenv setup, no conflicts.
+
+```bash
+pipx install freeread
+```
+
+> Install pipx first if needed: `pip install pipx` or `brew install pipx`
+
+### uv (recommended for developers)
+
+[uv](https://github.com/astral-sh/uv) is a fast Rust-based Python package manager.
+
+```bash
+# Install uv (one-time)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install freeread
+uv pip install freeread
+
+# Or run directly without installing
+uv run freeread <url>
+```
+
+### pip (classic)
+
 ```bash
 pip install freeread
 ```
 
-Or run directly from source:
+> If you hit `externally-managed-environment` on Ubuntu/Debian, add `--break-system-packages` or use pipx/uv instead.
+
+### Run from source
 
 ```bash
 git clone https://github.com/GHesericsu/freeread
