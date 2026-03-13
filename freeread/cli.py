@@ -13,6 +13,7 @@ import http.cookiejar
 import os
 import re
 import sys
+import threading
 from typing import Dict, List, Optional
 
 import html2text
@@ -22,6 +23,8 @@ from rich import print as rprint
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+
+from . import __version__
 
 console = Console()
 
@@ -55,12 +58,27 @@ RUNTIME = {
 }
 
 
+def check_for_updates():
+    """Check PyPI for the latest version of freeread."""
+    try:
+        response = requests.get("https://pypi.org/pypi/freeread/json", timeout=2)
+        if response.status_code == 200:
+            latest_version = response.json()["info"]["version"]
+            if latest_version != __version__:
+                console.print(
+                    f"\n[bold yellow]New version available: {latest_version}[/bold yellow] (current: {__version__})"
+                )
+                console.print(f"[dim]Run 'pipx upgrade freeread' to update[/dim]\n")
+    except Exception:
+        pass
+
+
 def parse_cookies(cookie_file: str):
     """Parse Netscape cookie file or text cookies."""
     cj = http.cookiejar.MozillaCookieJar(cookie_file)
     try:
         cj.load(ignore_discard=True, ignore_expires=True)
-    except Exception as e:
+    except Exception:
         # Try parsing as simple semicolon-separated string if file load fails
         if os.path.exists(cookie_file):
             with open(cookie_file, "r") as f:
@@ -73,18 +91,20 @@ def parse_cookies(cookie_file: str):
             if "=" in item:
                 name, value = item.strip().split("=", 1)
                 cookies[name] = value
-        return cookies
+        return cookies, []
 
     cookies = {}
     cookies_raw = []
     for cookie in cj:
         cookies[cookie.name] = cookie.value
-        cookies_raw.append({
-            "name": cookie.name,
-            "value": cookie.value,
-            "domain": cookie.domain,
-            "path": cookie.path,
-        })
+        cookies_raw.append(
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+            }
+        )
     return cookies, cookies_raw
 
 
@@ -355,6 +375,10 @@ def render_article(title: str, text: str, source: str, mode: str):
 
 
 def main():
+    # Start update check in a background thread to avoid blocking startup
+    update_thread = threading.Thread(target=check_for_updates, daemon=True)
+    update_thread.start()
+
     parser = argparse.ArgumentParser(
         description="freeread — read paywalled articles in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -374,6 +398,9 @@ def main():
         "-c",
         default=None,
         help="Path to a Netscape cookie file or a cookie string",
+    )
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"%(prog)s {__version__}"
     )
 
     args = parser.parse_args()
