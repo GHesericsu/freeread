@@ -18,6 +18,7 @@ Output modes:
 """
 
 import sys
+import os
 import argparse
 import requests
 from readability import Document
@@ -53,6 +54,11 @@ HEADERS_GOOGLEBOT = {
 TIMEOUT = 20
 MIN_CONTENT_LENGTH = 300
 
+# Runtime options set by CLI
+RUNTIME = {
+    "proxy": None,
+}
+
 
 # ── HTML → clean text ────────────────────────────────────────────────────────
 
@@ -79,13 +85,23 @@ def is_sufficient(text: str) -> bool:
 
 def try_archive_ph(url: str):
     """archive.ph — public cache, fastest."""
+    proxies = None
+    if RUNTIME.get("proxy"):
+        proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+
     for archive_url in [f"https://archive.ph/newest/{url}", f"https://archive.ph/{url}"]:
         try:
-            r = requests.get(archive_url, timeout=TIMEOUT, headers=HEADERS_NORMAL, allow_redirects=True)
+            r = requests.get(
+                archive_url,
+                timeout=TIMEOUT,
+                headers=HEADERS_NORMAL,
+                allow_redirects=True,
+                proxies=proxies,
+            )
             if r.status_code == 200:
                 title, text = clean_html_to_text(r.text)
                 if is_sufficient(text):
-                    return title, text, f"archive.ph"
+                    return title, text, "archive.ph"
         except Exception:
             continue
     return None
@@ -94,7 +110,10 @@ def try_archive_ph(url: str):
 def try_12ft(url: str):
     """12ft.io proxy."""
     try:
-        r = requests.get(f"https://12ft.io/proxy?q={url}", timeout=TIMEOUT, headers=HEADERS_NORMAL)
+        proxies = None
+        if RUNTIME.get("proxy"):
+            proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+        r = requests.get(f"https://12ft.io/proxy?q={url}", timeout=TIMEOUT, headers=HEADERS_NORMAL, proxies=proxies)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -107,7 +126,10 @@ def try_12ft(url: str):
 def try_google_referer(url: str):
     """Google Referer trick — publishers whitelist Google traffic."""
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER)
+        proxies = None
+        if RUNTIME.get("proxy"):
+            proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER, proxies=proxies)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -126,8 +148,12 @@ def try_cookie_clear(url: str):
     try:
         session = requests.Session()
         session.cookies.clear()
+        proxies = None
+        if RUNTIME.get("proxy"):
+            proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+
         # Fresh session, no cookies, Google referer
-        r = session.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER)
+        r = session.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER, proxies=proxies)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
@@ -140,11 +166,40 @@ def try_cookie_clear(url: str):
 def try_googlebot(url: str):
     """Googlebot user-agent spoof."""
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLEBOT)
+        proxies = None
+        if RUNTIME.get("proxy"):
+            proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLEBOT, proxies=proxies)
         if r.status_code == 200:
             title, text = clean_html_to_text(r.text)
             if is_sufficient(text):
                 return title, text, "Googlebot UA"
+    except Exception:
+        pass
+    return None
+
+
+def try_scrapling_http(url: str):
+    """Scrapling Fetcher (curl_cffi) — better browser impersonation than requests."""
+    try:
+        from scrapling.fetchers import Fetcher
+        f = Fetcher()
+        kwargs = dict(
+            headers=HEADERS_GOOGLE_REFERER,
+            timeout=TIMEOUT,
+            retries=2,
+            retry_delay=1,
+            follow_redirects=True,
+            stealthy_headers=True,
+            impersonate="chrome",
+        )
+        if RUNTIME.get("proxy"):
+            kwargs["proxy"] = RUNTIME["proxy"]
+        r = f.get(url, **kwargs)
+        if getattr(r, "status", None) == 200 and getattr(r, "html_content", None):
+            title, text = clean_html_to_text(r.html_content)
+            if is_sufficient(text):
+                return title, text, "Scrapling http"
     except Exception:
         pass
     return None
@@ -159,7 +214,18 @@ def try_stealth(url: str):
     try:
         from scrapling.fetchers import StealthyFetcher
         fetcher = StealthyFetcher()
-        page = fetcher.fetch(url)
+        kwargs = dict(
+            headless=True,
+            disable_resources=True,
+            network_idle=True,
+            extra_headers=HEADERS_GOOGLE_REFERER,
+            solve_cloudflare=True,
+            real_chrome=False,
+            wait=1,
+        )
+        if RUNTIME.get("proxy"):
+            kwargs["proxy"] = RUNTIME["proxy"]
+        page = fetcher.fetch(url, **kwargs)
         if page and page.html_content:
             title, text = clean_html_to_text(page.html_content)
             if is_sufficient(text):
@@ -169,18 +235,48 @@ def try_stealth(url: str):
     return None
 
 
+def try_dynamic(url: str):
+    """Scrapling DynamicFetcher (Playwright) — for JS-heavy pages."""
+    try:
+        from scrapling.fetchers import DynamicFetcher
+        fetcher = DynamicFetcher()
+        kwargs = dict(
+            headless=True,
+            disable_resources=True,
+            network_idle=True,
+            extra_headers=HEADERS_GOOGLE_REFERER,
+            wait=2,
+        )
+        if RUNTIME.get("proxy"):
+            kwargs["proxy"] = RUNTIME["proxy"]
+        page = fetcher.fetch(url, **kwargs)
+        if page and page.html_content:
+            title, text = clean_html_to_text(page.html_content)
+            if is_sufficient(text):
+                return title, text, "Scrapling dynamic"
+    except Exception:
+        pass
+    return None
+
+
 def try_wayback(url: str):
     """Wayback Machine — slower, comprehensive archive."""
     try:
+        proxies = None
+        if RUNTIME.get("proxy"):
+            proxies = {"http": RUNTIME["proxy"], "https": RUNTIME["proxy"]}
+
         r = requests.get(
             f"https://archive.org/wayback/available?url={url}",
-            timeout=TIMEOUT, headers=HEADERS_NORMAL
+            timeout=TIMEOUT,
+            headers=HEADERS_NORMAL,
+            proxies=proxies,
         )
         data = r.json()
         snapshot = data.get("archived_snapshots", {}).get("closest", {})
         if not snapshot or snapshot.get("status") != "200":
             return None
-        r2 = requests.get(snapshot["url"], timeout=TIMEOUT, headers=HEADERS_NORMAL)
+        r2 = requests.get(snapshot["url"], timeout=TIMEOUT, headers=HEADERS_NORMAL, proxies=proxies)
         r2.raise_for_status()
         title, text = clean_html_to_text(r2.text)
         if is_sufficient(text):
@@ -197,12 +293,14 @@ METHODS = {
     "12ft":    ("12ft.io",           try_12ft),
     "ref":     ("Google Referer",    try_google_referer),
     "cookie":  ("Cookie-clear",      try_cookie_clear),
+    "http":    ("Scrapling http",    try_scrapling_http),
     "bot":     ("Googlebot UA",      try_googlebot),
     "stealth": ("Scrapling stealth", try_stealth),
+    "dynamic": ("Scrapling dynamic", try_dynamic),
     "wb":      ("Wayback Machine",   try_wayback),
 }
 
-METHOD_ORDER = ["ph", "12ft", "ref", "cookie", "bot", "stealth", "wb"]
+METHOD_ORDER = ["ph", "12ft", "ref", "cookie", "http", "bot", "stealth", "dynamic", "wb"]
 
 
 def fetch_article(url: str, method: str | None = None):
@@ -250,13 +348,15 @@ def main():
         description="freeread — read paywalled articles in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-methods (default order: ph → 12ft → ref → cookie → bot → stealth → wb):
+methods (default order: ph → 12ft → ref → cookie → http → bot → stealth → dynamic → wb):
   ph       archive.ph public cache
   12ft     12ft.io proxy
   ref      Google Referer header trick
   cookie   Cookie-clearing (metered paywalls: NYT, WaPo, The Atlantic)
+  http     Scrapling HTTP fetch (curl_cffi impersonation)
   bot      Googlebot user-agent spoof
   stealth  Scrapling headless browser + Cloudflare bypass
+  dynamic  Scrapling Playwright fetch (JS-heavy)
   wb       Wayback Machine (slowest)
 
 output modes:
@@ -275,6 +375,11 @@ examples:
     parser.add_argument(
         "--method", "-m", choices=list(METHODS.keys()),
         help="Force a specific bypass method"
+    )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="Optional proxy URL (also reads FREEREAD_PROXY or DECODO_MOBILE_PROXY env vars)"
     )
     parser.add_argument(
         "--md", action="store_true",
@@ -301,6 +406,11 @@ examples:
     if not args.url:
         parser.print_help()
         sys.exit(1)
+
+    # Proxy resolution
+    proxy = args.proxy or os.environ.get("FREEREAD_PROXY") or os.environ.get("DECODO_MOBILE_PROXY")
+    if proxy:
+        RUNTIME["proxy"] = proxy
 
     output_mode = "md" if args.md else ("raw" if args.raw else "rich")
 
