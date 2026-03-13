@@ -2,16 +2,19 @@
 """
 freeread — bypass paywalls and read articles in your terminal.
 
-Tries multiple methods in order:
-  1. archive.ph (newest cached version)
-  2. 12ft.io proxy (Googlebot spoof via proxy)
-  3. Google referer trick (direct fetch with Google referer header)
-  4. Wayback Machine (archive.org — slower, used as last resort)
+Bypass methods (tried in order by default):
+  ph     archive.ph (public cache)
+  12ft   12ft.io proxy
+  ref    Google Referer header trick
+  cookie Cookie-clearing (beats metered paywalls like NYT, WaPo)
+  bot    Googlebot user-agent spoof
+  stealth Scrapling StealthyFetcher (Cloudflare bypass, headless)
+  wb     Wayback Machine (slowest, last resort)
 
-Usage:
-  freeread <url>
-  freeread <url> --raw           # plain text, no formatting (good for piping)
-  freeread <url> --method ph     # force a specific method
+Output modes:
+  default  Rich terminal rendering
+  --md     Clean markdown (great for piping to an LLM)
+  --raw    Plain text, no formatting
 """
 
 import sys
@@ -28,8 +31,10 @@ import re
 console = Console()
 
 HEADERS_NORMAL = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 }
@@ -49,8 +54,10 @@ TIMEOUT = 20
 MIN_CONTENT_LENGTH = 300
 
 
+# ── HTML → clean text ────────────────────────────────────────────────────────
+
 def clean_html_to_text(html: str) -> tuple[str, str]:
-    """Extract title and clean article text from HTML."""
+    """Extract title + clean markdown from raw HTML via readability + html2text."""
     doc = Document(html)
     title = doc.title()
     content_html = doc.summary()
@@ -60,114 +67,149 @@ def clean_html_to_text(html: str) -> tuple[str, str]:
     converter.ignore_images = True
     converter.body_width = 0
     text = converter.handle(content_html)
-
-    # Clean up excessive blank lines
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return title, text
 
 
-def try_archive_ph(url: str) -> tuple[str, str, str] | None:
-    """Try archive.ph newest cached version."""
-    archive_url = f"https://archive.ph/newest/{url}"
+def is_sufficient(text: str) -> bool:
+    return len(text) >= MIN_CONTENT_LENGTH
+
+
+# ── Bypass methods ────────────────────────────────────────────────────────────
+
+def try_archive_ph(url: str):
+    """archive.ph — public cache, fastest."""
+    for archive_url in [f"https://archive.ph/newest/{url}", f"https://archive.ph/{url}"]:
+        try:
+            r = requests.get(archive_url, timeout=TIMEOUT, headers=HEADERS_NORMAL, allow_redirects=True)
+            if r.status_code == 200:
+                title, text = clean_html_to_text(r.text)
+                if is_sufficient(text):
+                    return title, text, f"archive.ph"
+        except Exception:
+            continue
+    return None
+
+
+def try_12ft(url: str):
+    """12ft.io proxy."""
     try:
-        r = requests.get(
-            archive_url, timeout=TIMEOUT, headers=HEADERS_NORMAL, allow_redirects=True
-        )
-        if r.status_code == 429:
-            # Rate limited — try the base archive.ph search
-            r = requests.get(
-                f"https://archive.ph/{url}", timeout=TIMEOUT,
-                headers=HEADERS_NORMAL, allow_redirects=True
-            )
-        if r.status_code not in (200,):
-            return None
-        title, text = clean_html_to_text(r.text)
-        if len(text) < MIN_CONTENT_LENGTH:
-            return None
-        return title, text, f"archive.ph ({r.url})"
+        r = requests.get(f"https://12ft.io/proxy?q={url}", timeout=TIMEOUT, headers=HEADERS_NORMAL)
+        if r.status_code == 200:
+            title, text = clean_html_to_text(r.text)
+            if is_sufficient(text):
+                return title, text, "12ft.io"
     except Exception:
-        return None
+        pass
+    return None
 
 
-def try_12ft(url: str) -> tuple[str, str, str] | None:
-    """Try 12ft.io proxy (routes request via Googlebot)."""
-    proxy_url = f"https://12ft.io/proxy?q={url}"
-    try:
-        r = requests.get(proxy_url, timeout=TIMEOUT, headers=HEADERS_NORMAL)
-        if r.status_code != 200:
-            return None
-        title, text = clean_html_to_text(r.text)
-        if len(text) < MIN_CONTENT_LENGTH:
-            return None
-        return title, text, "12ft.io"
-    except Exception:
-        return None
-
-
-def try_google_referer(url: str) -> tuple[str, str, str] | None:
-    """Fetch directly with Google referer header — many publishers whitelist Google traffic."""
+def try_google_referer(url: str):
+    """Google Referer trick — publishers whitelist Google traffic."""
     try:
         r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER)
-        if r.status_code != 200:
-            return None
-        title, text = clean_html_to_text(r.text)
-        if len(text) < MIN_CONTENT_LENGTH:
-            return None
-        return title, text, "Google referer"
+        if r.status_code == 200:
+            title, text = clean_html_to_text(r.text)
+            if is_sufficient(text):
+                return title, text, "Google referer"
     except Exception:
-        return None
+        pass
+    return None
 
 
-def try_googlebot(url: str) -> tuple[str, str, str] | None:
-    """Fetch directly with Googlebot user-agent."""
+def try_cookie_clear(url: str):
+    """
+    Cookie-clearing bypass — works on metered paywalls (NYT, WaPo, The Atlantic).
+    These sites track article count via cookies. Fresh session = full access.
+    Technique inspired by Bypass Paywalls Clean (BPC).
+    """
+    try:
+        session = requests.Session()
+        session.cookies.clear()
+        # Fresh session, no cookies, Google referer
+        r = session.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLE_REFERER)
+        if r.status_code == 200:
+            title, text = clean_html_to_text(r.text)
+            if is_sufficient(text):
+                return title, text, "cookie-clear"
+    except Exception:
+        pass
+    return None
+
+
+def try_googlebot(url: str):
+    """Googlebot user-agent spoof."""
     try:
         r = requests.get(url, timeout=TIMEOUT, headers=HEADERS_GOOGLEBOT)
-        if r.status_code != 200:
-            return None
-        title, text = clean_html_to_text(r.text)
-        if len(text) < MIN_CONTENT_LENGTH:
-            return None
-        return title, text, "Googlebot UA"
+        if r.status_code == 200:
+            title, text = clean_html_to_text(r.text)
+            if is_sufficient(text):
+                return title, text, "Googlebot UA"
     except Exception:
-        return None
+        pass
+    return None
 
 
-def try_wayback(url: str) -> tuple[str, str, str] | None:
-    """Try Wayback Machine (archive.org) — slower, used as fallback."""
-    api = f"https://archive.org/wayback/available?url={url}"
+def try_stealth(url: str):
+    """
+    Scrapling StealthyFetcher — headless browser with Cloudflare bypass.
+    Works on JS-rendered sites and aggressive bot-detection paywalls.
+    Slower but more powerful than simple HTTP methods.
+    """
     try:
-        r = requests.get(api, timeout=TIMEOUT, headers=HEADERS_NORMAL)
+        from scrapling.fetchers import StealthyFetcher
+        fetcher = StealthyFetcher()
+        page = fetcher.fetch(url)
+        if page and page.html_content:
+            title, text = clean_html_to_text(page.html_content)
+            if is_sufficient(text):
+                return title, text, "Scrapling stealth"
+    except Exception:
+        pass
+    return None
+
+
+def try_wayback(url: str):
+    """Wayback Machine — slower, comprehensive archive."""
+    try:
+        r = requests.get(
+            f"https://archive.org/wayback/available?url={url}",
+            timeout=TIMEOUT, headers=HEADERS_NORMAL
+        )
         data = r.json()
         snapshot = data.get("archived_snapshots", {}).get("closest", {})
         if not snapshot or snapshot.get("status") != "200":
             return None
-        archived_url = snapshot["url"]
-        r2 = requests.get(archived_url, timeout=TIMEOUT, headers=HEADERS_NORMAL)
+        r2 = requests.get(snapshot["url"], timeout=TIMEOUT, headers=HEADERS_NORMAL)
         r2.raise_for_status()
         title, text = clean_html_to_text(r2.text)
-        if len(text) < MIN_CONTENT_LENGTH:
-            return None
-        return title, text, f"Wayback Machine"
+        if is_sufficient(text):
+            return title, text, "Wayback Machine"
     except Exception:
-        return None
+        pass
+    return None
 
+
+# ── Method registry ───────────────────────────────────────────────────────────
 
 METHODS = {
-    "ph":   ("archive.ph",      try_archive_ph),
-    "12ft": ("12ft.io",         try_12ft),
-    "ref":  ("Google Referer",  try_google_referer),
-    "bot":  ("Googlebot UA",    try_googlebot),
-    "wb":   ("Wayback Machine", try_wayback),
+    "ph":      ("archive.ph",        try_archive_ph),
+    "12ft":    ("12ft.io",           try_12ft),
+    "ref":     ("Google Referer",    try_google_referer),
+    "cookie":  ("Cookie-clear",      try_cookie_clear),
+    "bot":     ("Googlebot UA",      try_googlebot),
+    "stealth": ("Scrapling stealth", try_stealth),
+    "wb":      ("Wayback Machine",   try_wayback),
 }
 
-METHOD_ORDER = ["ph", "12ft", "ref", "bot", "wb"]
+METHOD_ORDER = ["ph", "12ft", "ref", "cookie", "bot", "stealth", "wb"]
 
 
-def fetch_article(url: str, method: str | None = None) -> tuple[str, str, str] | None:
+def fetch_article(url: str, method: str | None = None):
     methods = [method] if method else METHOD_ORDER
     for key in methods:
         name, fn = METHODS[key]
-        console.print(f"  [dim]→ trying {name}...[/dim]", end="\r")
+        console.print(f"  [dim]→ {name}...[/dim]", end="\r")
         result = fn(url)
         if result:
             console.print(" " * 50, end="\r")
@@ -175,11 +217,22 @@ def fetch_article(url: str, method: str | None = None) -> tuple[str, str, str] |
     return None
 
 
-def render_article(title: str, text: str, source: str, raw: bool = False):
-    if raw:
+# ── Output rendering ──────────────────────────────────────────────────────────
+
+def render_article(title: str, text: str, source: str, mode: str = "rich"):
+    """
+    mode: "rich" (default), "md" (clean markdown for LLMs), "raw" (plain text)
+    """
+    if mode == "raw":
         print(f"# {title}\n\n{text}")
         return
 
+    if mode == "md":
+        # Clean markdown — no ANSI, perfect for piping to an LLM
+        print(f"# {title}\n\n> *via {source}*\n\n{text}")
+        return
+
+    # Rich terminal rendering
     console.print()
     console.print(Panel(
         f"[bold]{title}[/bold]\n[dim]via {source}[/dim]",
@@ -190,35 +243,58 @@ def render_article(title: str, text: str, source: str, raw: bool = False):
     console.print(Markdown(text))
 
 
+# ── CLI entry point ───────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(
         description="freeread — read paywalled articles in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-methods:
-  ph    archive.ph (fastest — checks public cache)
-  12ft  12ft.io proxy
-  ref   Google Referer header trick
-  bot   Googlebot user-agent spoof
-  wb    Wayback Machine (slowest — last resort)
+methods (default order: ph → 12ft → ref → cookie → bot → stealth → wb):
+  ph       archive.ph public cache
+  12ft     12ft.io proxy
+  ref      Google Referer header trick
+  cookie   Cookie-clearing (metered paywalls: NYT, WaPo, The Atlantic)
+  bot      Googlebot user-agent spoof
+  stealth  Scrapling headless browser + Cloudflare bypass
+  wb       Wayback Machine (slowest)
+
+output modes:
+  (default)   Rich terminal with markdown rendering
+  --md        Clean markdown — pipe to an LLM or save to file
+  --raw       Plain text
 
 examples:
   freeread https://www.nytimes.com/some-article
-  freeread https://ft.com/article --method wb
-  freeread https://wsj.com/article --raw | less
+  freeread https://ft.com/article --method cookie
+  freeread https://wsj.com/article --md | llm "summarize this"
+  freeread https://wsj.com/article --md > article.md
         """
     )
     parser.add_argument("url", nargs="?", help="Article URL to fetch")
-    parser.add_argument("--raw", action="store_true", help="Plain text output (no rich formatting)")
-    parser.add_argument("--method", "-m", choices=list(METHODS.keys()), help="Force a specific method")
-    parser.add_argument("--list-methods", action="store_true", help="List available bypass methods")
+    parser.add_argument(
+        "--method", "-m", choices=list(METHODS.keys()),
+        help="Force a specific bypass method"
+    )
+    parser.add_argument(
+        "--md", action="store_true",
+        help="Output clean markdown (ideal for LLM consumption)"
+    )
+    parser.add_argument(
+        "--raw", action="store_true",
+        help="Output plain text (no formatting)"
+    )
+    parser.add_argument(
+        "--list-methods", action="store_true",
+        help="List available bypass methods and exit"
+    )
 
     args = parser.parse_args()
 
     if args.list_methods:
-        rprint("\n[bold]Available methods:[/bold]")
+        rprint("\n[bold]Bypass methods:[/bold]")
         for key, (name, _) in METHODS.items():
-            rprint(f"  [cyan]{key:6}[/cyan] {name}")
+            rprint(f"  [cyan]{key:8}[/cyan] {name}")
         rprint()
         sys.exit(0)
 
@@ -226,18 +302,30 @@ examples:
         parser.print_help()
         sys.exit(1)
 
+    output_mode = "md" if args.md else ("raw" if args.raw else "rich")
+
+    # Suppress status output for clean pipe modes
+    if output_mode in ("md", "raw"):
+        console.quiet = True
+
     console.print(f"\n[bold green]freeread[/bold green] [dim]{args.url}[/dim]\n")
 
     result = fetch_article(args.url, args.method)
 
     if not result:
-        console.print("[bold red]✗ Failed[/bold red] — no archive found via any method.")
-        console.print("[dim]Try a different --method, or the paywall may be fully server-side.[/dim]\n")
+        if output_mode not in ("md", "raw"):
+            console.print("[bold red]✗ Failed[/bold red] — no content found via any method.")
+            console.print("[dim]Try --method stealth for JS-heavy sites, or the paywall may be fully server-side.[/dim]\n")
+        else:
+            print("ERROR: Could not retrieve article.", file=sys.stderr)
         sys.exit(1)
 
     title, text, source = result
-    console.print(f"[bold green]✓[/bold green] Retrieved via [cyan]{source}[/cyan]")
-    render_article(title, text, source, raw=args.raw)
+
+    if output_mode == "rich":
+        console.print(f"[bold green]✓[/bold green] Retrieved via [cyan]{source}[/cyan]")
+
+    render_article(title, text, source, mode=output_mode)
 
 
 if __name__ == "__main__":
