@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import threading
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 
 import html2text
@@ -23,6 +24,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 
 from . import __version__
 
@@ -374,6 +376,202 @@ def render_article(title: str, text: str, source: str, mode: str):
     console.print(Markdown(text))
 
 
+NEWS_SOURCES = {
+    "google": {
+        "name": "Google News",
+        "url": "https://news.google.com/rss?hl=en&gl=US&ceid=US:en",
+        "type": "rss",
+    },
+    "bbc": {
+        "name": "BBC World",
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "type": "rss",
+    },
+    "aljazeera": {
+        "name": "Al Jazeera",
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "type": "rss",
+    },
+    "npr": {
+        "name": "NPR News",
+        "url": "https://feeds.npr.org/1001/rss.xml",
+        "type": "rss",
+    },
+    "hn": {
+        "name": "Hacker News",
+        "url": "https://hacker-news.firebaseio.com/v0/topstories.json",
+        "type": "hn_api",
+    },
+    "reddit": {
+        "name": "Reddit World News",
+        "url": "https://www.reddit.com/r/worldnews/.rss?limit=25",
+        "type": "reddit_rss",
+    },
+}
+
+DEFAULT_NEWS_SOURCE = "google"
+
+
+def _parse_rss_items(content: bytes, count: int) -> list[dict]:
+    """Parse RSS XML and return headline dicts."""
+    root = ET.fromstring(content)
+    items = root.findall(".//item")
+
+    headlines = []
+    for item in items[:count]:
+        title = item.findtext("title", "").strip()
+        link = item.findtext("link", "").strip()
+        source = item.findtext("source", "").strip()
+        pub_date = item.findtext("pubDate", "").strip()
+        # Shorten: "Sat, 14 Mar 2026 10:00:00 GMT" → "Sat, 14 Mar 2026"
+        short_date = pub_date.rsplit(" ", 2)[0] if pub_date else ""
+        headlines.append(
+            {"title": title, "link": link, "source": source, "date": short_date}
+        )
+    return headlines
+
+
+def _fetch_hn_items(count: int) -> list[dict]:
+    """Fetch top stories from Hacker News Firebase API."""
+    r = requests.get(
+        "https://hacker-news.firebaseio.com/v0/topstories.json",
+        headers=HEADERS_NORMAL,
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    story_ids = r.json()[:count]
+
+    headlines = []
+    for sid in story_ids:
+        try:
+            sr = requests.get(
+                f"https://hacker-news.firebaseio.com/v0/item/{sid}.json",
+                headers=HEADERS_NORMAL,
+                timeout=10,
+            )
+            sr.raise_for_status()
+            story = sr.json()
+            url = story.get("url", f"https://news.ycombinator.com/item?id={sid}")
+            score = story.get("score", 0)
+            headlines.append(
+                {
+                    "title": story.get("title", ""),
+                    "link": url,
+                    "source": f"↑{score}",
+                    "date": "",
+                }
+            )
+        except Exception:
+            continue
+    return headlines
+
+
+def _parse_reddit_rss(content: bytes, count: int) -> list[dict]:
+    """Parse Reddit Atom RSS feed."""
+    ATOM = "{http://www.w3.org/2005/Atom}"
+    root = ET.fromstring(content)
+    entries = root.findall(f".//{ATOM}entry")
+
+    headlines = []
+    for entry in entries:
+        title = (entry.findtext(f"{ATOM}title") or "").strip()
+        # Skip sticky/megathread posts
+        if title.startswith("/r/") and ("Live Thread" in title or "Discussion Thread" in title):
+            continue
+        link_el = entry.find(f"{ATOM}link")
+        link = link_el.get("href", "") if link_el is not None else ""
+        updated = (entry.findtext(f"{ATOM}updated") or "").strip()
+        short_date = updated[:10] if updated else ""
+        # Extract actual article link from content HTML
+        content_el = entry.findtext(f"{ATOM}content") or ""
+        ext_link = ""
+        if content_el:
+            match = re.search(r'<a href="(https?://[^"]+)">\[link\]</a>', content_el)
+            if match:
+                ext_link = match.group(1)
+        headlines.append(
+            {
+                "title": title,
+                "link": ext_link or link,
+                "source": "r/worldnews",
+                "date": short_date,
+            }
+        )
+        if len(headlines) >= count:
+            break
+    return headlines
+
+
+def fetch_news(source_key: str = DEFAULT_NEWS_SOURCE, count: int = 10) -> list[dict]:
+    """Fetch top headlines from the specified source."""
+    src = NEWS_SOURCES.get(source_key)
+    if not src:
+        console.print(f"[bold red]✗ Unknown source:[/bold red] {source_key}")
+        console.print(f"[dim]Available: {', '.join(NEWS_SOURCES.keys())}[/dim]")
+        sys.exit(1)
+
+    try:
+        if src["type"] == "hn_api":
+            return _fetch_hn_items(count)
+        else:
+            # Reddit blocks browser UAs but allows bot-style ones
+            if src["type"] == "reddit_rss":
+                headers = {"User-Agent": "freeread/1.0", "Accept": "application/rss+xml"}
+            else:
+                headers = HEADERS_NORMAL
+            r = requests.get(src["url"], headers=headers, timeout=TIMEOUT)
+            r.raise_for_status()
+            if src["type"] == "reddit_rss":
+                return _parse_reddit_rss(r.content, count)
+            return _parse_rss_items(r.content, count)
+    except Exception as e:
+        console.print(f"[bold red]✗ Failed to fetch from {src['name']}:[/bold red] {e}")
+        sys.exit(1)
+
+
+def render_news(headlines: list[dict], source_name: str, mode: str):
+    """Render news headlines in the requested output mode."""
+    if mode == "raw":
+        for i, h in enumerate(headlines, 1):
+            print(f"{i}. {h['title']}")
+            if h["source"]:
+                print(f"   Source: {h['source']}")
+            print(f"   {h['link']}")
+            print()
+        return
+
+    if mode == "md":
+        print(f"# Top Headlines — {source_name}\n")
+        for i, h in enumerate(headlines, 1):
+            src = f" — *{h['source']}*" if h["source"] else ""
+            print(f"{i}. [{h['title']}]({h['link']}){src}")
+        return
+
+    # Rich terminal output
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]📰 Top Headlines — {source_name}[/bold]",
+            expand=False,
+            border_style="green",
+        )
+    )
+    console.print()
+
+    for i, h in enumerate(headlines, 1):
+        src_tag = f"  [cyan]{h['source']}[/cyan]" if h["source"] else ""
+        date_tag = f"  [dim]{h['date']}[/dim]" if h["date"] else ""
+        console.print(f"  [bold]{i:>2}.[/bold] {h['title']}{src_tag}{date_tag}")
+        console.print(f"      [dim]{h['link']}[/dim]")
+        console.print()
+
+    console.print("[dim]Read any article: freeread <url>[/dim]")
+    console.print(
+        f"[dim]Sources: {', '.join(NEWS_SOURCES.keys())} · freeread news --source <name>[/dim]"
+    )
+    console.print()
+
+
 def main():
     # Start update check in a background thread to avoid blocking startup
     update_thread = threading.Thread(target=check_for_updates, daemon=True)
@@ -383,7 +581,7 @@ def main():
         description="freeread — read paywalled articles in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("url", nargs="?", help="Article URL")
+    parser.add_argument("url", nargs="?", help="Article URL or 'news' for top headlines")
     parser.add_argument("--method", "-m", choices=list(METHODS.keys()), help="Force a bypass method")
     parser.add_argument("--md", action="store_true", help="Output clean markdown")
     parser.add_argument("--raw", action="store_true", help="Output plain text")
@@ -400,6 +598,13 @@ def main():
         help="Path to a Netscape cookie file or a cookie string",
     )
     parser.add_argument(
+        "--source",
+        "-s",
+        default=None,
+        choices=list(NEWS_SOURCES.keys()),
+        help="News source for 'freeread news' (default: google)",
+    )
+    parser.add_argument(
         "--version", "-v", action="version", version=f"%(prog)s {__version__}"
     )
 
@@ -410,6 +615,21 @@ def main():
         for key, (name, _) in METHODS.items():
             rprint(f"  [cyan]{key:8}[/cyan] {name}")
         rprint()
+        return
+
+    # Handle "freeread news" command
+    if args.url and args.url.lower() == "news":
+        output_mode = "md" if args.md else ("raw" if args.raw else "rich")
+        if output_mode in ("md", "raw"):
+            console.quiet = True
+        source_key = getattr(args, "source", DEFAULT_NEWS_SOURCE) or DEFAULT_NEWS_SOURCE
+        src = NEWS_SOURCES.get(source_key)
+        if not src:
+            console.print(f"[bold red]✗ Unknown source:[/bold red] {source_key}")
+            console.print(f"[dim]Available: {', '.join(NEWS_SOURCES.keys())}[/dim]")
+            sys.exit(1)
+        headlines = fetch_news(source_key=source_key, count=10)
+        render_news(headlines, source_name=src["name"], mode=output_mode)
         return
 
     if not args.url:
