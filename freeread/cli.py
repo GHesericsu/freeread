@@ -541,26 +541,15 @@ def _fetch_single_source(source_key: str, count: int) -> list[dict]:
 
 
 def _fetch_mix() -> list[dict]:
-    """Fetch a mixed feed: BBC, NPR, Al Jazeera + 4 Reddit + 4 HN."""
+    """Fetch a mixed feed from BBC, NPR, and Al Jazeera."""
     headlines = []
 
-    # Pull from multiple RSS sources (2 each)
     for key in ("bbc", "npr", "aljazeera"):
-        items = _fetch_single_source(key, 2)
+        items = _fetch_single_source(key, 4)
         for item in items:
             if not item["source"]:
                 item["source"] = NEWS_SOURCES[key]["name"]
         headlines.extend(items)
-
-    # 4 from Reddit
-    reddit_items = _fetch_single_source("reddit", 4)
-    headlines.extend(reddit_items)
-
-    # 4 from Hacker News
-    hn_items = _fetch_single_source("hn", 4)
-    for item in hn_items:
-        item["source"] = f"HN {item['source']}"  # e.g. "HN ↑773"
-    headlines.extend(hn_items)
 
     return headlines
 
