@@ -77,6 +77,19 @@ pip install -e .
 freeread <url>
 ```
 
+## Update
+
+```bash
+# pipx
+pipx upgrade freeread
+
+# uv
+uv pip install --upgrade freeread
+
+# pip
+pip install --upgrade freeread
+```
+
 ## Usage
 
 ```bash
@@ -102,6 +115,16 @@ freeread https://nytimes.com/article --raw
 
 # List available methods
 freeread --list-methods
+
+# Top 10 headlines (default: Google News)
+freeread news
+
+# Pick a source
+freeread news --source bbc
+freeread news --source hn
+freeread news -s aljazeera --raw
+
+# Available sources: google, bbc, aljazeera, npr, hn, reddit
 ```
 
 ## Limitations

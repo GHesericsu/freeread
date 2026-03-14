@@ -579,6 +579,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="freeread — read paywalled articles in your terminal",
+        epilog="Update:\n  pipx upgrade freeread\n  uv pip install --upgrade freeread\n  pip install --upgrade freeread",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("url", nargs="?", help="Article URL or 'news' for top headlines")
