@@ -14,9 +14,13 @@ import os
 import re
 import sys
 import threading
+import warnings
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
+
+# Suppress harmless requests/urllib3 version mismatch warnings
+warnings.filterwarnings("ignore", message="urllib3.*doesn't match a supported version")
 
 import html2text
 import requests
