@@ -65,14 +65,30 @@ RUNTIME = {
 def check_for_updates():
     """Check PyPI for the latest version of freeread."""
     try:
+        from packaging.version import Version
+    except ImportError:
+        # packaging is usually available, but fall back to tuple comparison
+        Version = None
+
+    try:
         response = requests.get("https://pypi.org/pypi/freeread/json", timeout=2)
         if response.status_code == 200:
             latest_version = response.json()["info"]["version"]
-            if latest_version != __version__:
-                console.print(
-                    f"\n[bold yellow]New version available: {latest_version}[/bold yellow] (current: {__version__})"
-                )
-                console.print(f"[dim]Run 'pipx upgrade freeread' to update[/dim]\n")
+            if latest_version == __version__:
+                return
+            # Only notify if PyPI version is actually newer
+            if Version is not None:
+                if Version(latest_version) <= Version(__version__):
+                    return
+            else:
+                if tuple(int(x) for x in latest_version.split(".")) <= tuple(
+                    int(x) for x in __version__.split(".")
+                ):
+                    return
+            console.print(
+                f"\n[bold yellow]New version available: {latest_version}[/bold yellow] (current: {__version__})"
+            )
+            console.print(f"[dim]Run 'pipx upgrade freeread' to update[/dim]\n")
     except Exception:
         pass
 
