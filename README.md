@@ -116,15 +116,15 @@ freeread https://nytimes.com/article --raw
 # List available methods
 freeread --list-methods
 
-# Top 10 headlines (default: Google News)
+# Top headlines from multiple sources (default)
 freeread news
 
-# Pick a source
+# Pick a single source
 freeread news --source bbc
 freeread news --source hn
 freeread news -s aljazeera --raw
 
-# Available sources: google, bbc, aljazeera, npr, hn, reddit
+# Available sources: mix (default), google, bbc, aljazeera, npr, hn, reddit
 ```
 
 ## Limitations

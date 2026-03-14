@@ -377,6 +377,10 @@ def render_article(title: str, text: str, source: str, mode: str):
 
 
 NEWS_SOURCES = {
+    "mix": {
+        "name": "Top Headlines",
+        "type": "mix",
+    },
     "google": {
         "name": "Google News",
         "url": "https://news.google.com/rss?hl=en&gl=US&ceid=US:en",
@@ -409,7 +413,7 @@ NEWS_SOURCES = {
     },
 }
 
-DEFAULT_NEWS_SOURCE = "google"
+DEFAULT_NEWS_SOURCE = "mix"
 
 
 def _parse_rss_items(content: bytes, count: int) -> list[dict]:
@@ -502,19 +506,13 @@ def _parse_reddit_rss(content: bytes, count: int) -> list[dict]:
     return headlines
 
 
-def fetch_news(source_key: str = DEFAULT_NEWS_SOURCE, count: int = 10) -> list[dict]:
-    """Fetch top headlines from the specified source."""
-    src = NEWS_SOURCES.get(source_key)
-    if not src:
-        console.print(f"[bold red]✗ Unknown source:[/bold red] {source_key}")
-        console.print(f"[dim]Available: {', '.join(NEWS_SOURCES.keys())}[/dim]")
-        sys.exit(1)
-
+def _fetch_single_source(source_key: str, count: int) -> list[dict]:
+    """Fetch headlines from a single source. Returns [] on failure."""
+    src = NEWS_SOURCES[source_key]
     try:
         if src["type"] == "hn_api":
             return _fetch_hn_items(count)
         else:
-            # Reddit blocks browser UAs but allows bot-style ones
             if src["type"] == "reddit_rss":
                 headers = {"User-Agent": "freeread/1.0", "Accept": "application/rss+xml"}
             else:
@@ -524,9 +522,51 @@ def fetch_news(source_key: str = DEFAULT_NEWS_SOURCE, count: int = 10) -> list[d
             if src["type"] == "reddit_rss":
                 return _parse_reddit_rss(r.content, count)
             return _parse_rss_items(r.content, count)
-    except Exception as e:
-        console.print(f"[bold red]✗ Failed to fetch from {src['name']}:[/bold red] {e}")
+    except Exception:
+        return []
+
+
+def _fetch_mix() -> list[dict]:
+    """Fetch a mixed feed: BBC, NPR, Al Jazeera + 4 Reddit + 4 HN."""
+    headlines = []
+
+    # Pull from multiple RSS sources (2 each)
+    for key in ("bbc", "npr", "aljazeera"):
+        items = _fetch_single_source(key, 2)
+        for item in items:
+            if not item["source"]:
+                item["source"] = NEWS_SOURCES[key]["name"]
+        headlines.extend(items)
+
+    # 4 from Reddit
+    reddit_items = _fetch_single_source("reddit", 4)
+    headlines.extend(reddit_items)
+
+    # 4 from Hacker News
+    hn_items = _fetch_single_source("hn", 4)
+    for item in hn_items:
+        item["source"] = f"HN {item['source']}"  # e.g. "HN ↑773"
+    headlines.extend(hn_items)
+
+    return headlines
+
+
+def fetch_news(source_key: str = DEFAULT_NEWS_SOURCE, count: int = 10) -> list[dict]:
+    """Fetch top headlines from the specified source."""
+    src = NEWS_SOURCES.get(source_key)
+    if not src:
+        console.print(f"[bold red]✗ Unknown source:[/bold red] {source_key}")
+        console.print(f"[dim]Available: {', '.join(NEWS_SOURCES.keys())}[/dim]")
         sys.exit(1)
+
+    if src["type"] == "mix":
+        return _fetch_mix()
+
+    result = _fetch_single_source(source_key, count)
+    if not result:
+        console.print(f"[bold red]✗ Failed to fetch from {src['name']}[/bold red]")
+        sys.exit(1)
+    return result
 
 
 def render_news(headlines: list[dict], source_name: str, mode: str):
@@ -603,7 +643,7 @@ def main():
         "-s",
         default=None,
         choices=list(NEWS_SOURCES.keys()),
-        help="News source for 'freeread news' (default: google)",
+        help="News source for 'freeread news' (default: mix)",
     )
     parser.add_argument(
         "--version", "-v", action="version", version=f"%(prog)s {__version__}"
