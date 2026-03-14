@@ -16,6 +16,7 @@ import sys
 import threading
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import html2text
 import requests
@@ -23,6 +24,7 @@ from readability import Document
 from rich import print as rprint
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -601,8 +603,15 @@ def render_news(headlines: list[dict], source_name: str, mode: str):
     for i, h in enumerate(headlines, 1):
         src_tag = f"  [cyan]{h['source']}[/cyan]" if h["source"] else ""
         date_tag = f"  [dim]{h['date']}[/dim]" if h["date"] else ""
-        console.print(f"  [bold]{i:>2}.[/bold] {h['title']}{src_tag}{date_tag}")
-        console.print(f"      [dim]{h['link']}[/dim]")
+        # Extract domain for short display: "https://www.bbc.com/news/..." → "bbc.com"
+        try:
+            domain = urlparse(h["link"]).netloc.removeprefix("www.")
+        except Exception:
+            domain = h["link"]
+        safe_url = rich_escape(h["link"])
+        safe_title = rich_escape(h["title"])
+        console.print(f"  [bold]{i:>2}.[/bold] [link={safe_url}]{safe_title}[/link]{src_tag}{date_tag}")
+        console.print(f"      [dim][link={safe_url}]🔗 {rich_escape(domain)}[/link][/dim]")
         console.print()
 
     console.print("[dim]Read any article: freeread <url>[/dim]")
