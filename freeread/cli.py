@@ -473,12 +473,11 @@ def _fetch_hn_items(count: int) -> list[dict]:
             )
             sr.raise_for_status()
             story = sr.json()
-            url = story.get("url", f"https://news.ycombinator.com/item?id={sid}")
             score = story.get("score", 0)
             headlines.append(
                 {
                     "title": story.get("title", ""),
-                    "link": url,
+                    "link": f"https://news.ycombinator.com/item?id={sid}",
                     "source": f"↑{score}",
                     "date": "",
                 }
@@ -504,17 +503,10 @@ def _parse_reddit_rss(content: bytes, count: int) -> list[dict]:
         link = link_el.get("href", "") if link_el is not None else ""
         updated = (entry.findtext(f"{ATOM}updated") or "").strip()
         short_date = updated[:10] if updated else ""
-        # Extract actual article link from content HTML
-        content_el = entry.findtext(f"{ATOM}content") or ""
-        ext_link = ""
-        if content_el:
-            match = re.search(r'<a href="(https?://[^"]+)">\[link\]</a>', content_el)
-            if match:
-                ext_link = match.group(1)
         headlines.append(
             {
                 "title": title,
-                "link": ext_link or link,
+                "link": link,
                 "source": "r/worldnews",
                 "date": short_date,
             }
